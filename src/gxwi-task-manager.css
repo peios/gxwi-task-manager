@@ -191,5 +191,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent-soli
 @media (max-width: 560px) {
     .details { width: 50%; }
     .head, .entries button, .entries .group { grid-template-columns: minmax(0, 1fr) 56px; }
+    .entries .group .name { grid-column: auto; }
     .head .sort:nth-child(2), .entries .pid, .head .sort:nth-last-child(2), .entries .num:nth-last-child(2) { display: none; }
 }
