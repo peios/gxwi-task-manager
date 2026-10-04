@@ -201,6 +201,111 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent-soli
     color: var(--text-muted);
 }
 
+/* Performance: every resource down the side, each with a small graph; the
+   one picked in full beside them. A graph is an SVG stretched over its box,
+   its colours set here by class: no inline style reaches the page. */
+.k-cpu { --line: #3b82f6; }
+.k-kernel { --line: #93c5fd; }
+.k-memory { --line: #a855f7; }
+.k-cached { --line: #d8b4fe; }
+.k-free { --line: var(--border-strong); }
+.k-disk, .k-disk-2 { --line: #10b981; }
+.k-net, .k-net-2 { --line: #f97316; }
+
+.resources {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    gap: var(--space-1);
+    width: 250px;
+    padding: var(--space-2);
+    overflow-y: auto;
+    border-right: 1px solid var(--border-default);
+}
+.resources .item {
+    display: grid;
+    grid-template-columns: 76px minmax(0, 1fr);
+    gap: var(--space-2);
+    align-items: center;
+    padding: var(--space-2);
+    text-align: left;
+    color: inherit;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    cursor: default;
+}
+.resources .item:hover { background: var(--surface-2); }
+.resources .item[aria-pressed="true"] { background: var(--surface-2); border-color: var(--accent-solid); }
+.resources .spark { position: relative; height: 44px; background: var(--bg-sunken); border: 1px solid var(--line); }
+.resources .what { display: grid; min-width: 0; }
+.resources .what b, .resources .what small { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.resources .what b { font-weight: 600; }
+.resources .what small { font-size: 12px; color: var(--text-secondary); }
+
+.resource { flex: 1; min-width: 0; padding: var(--space-4); overflow-y: auto; }
+.resource .said { margin: 0 0 var(--space-3); }
+.resource header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-2); }
+.resource h2 { margin: 0; font-size: 20px; font-weight: 600; }
+.resource .model { font-size: 13px; color: var(--text-secondary); }
+.resource > .tabs { margin-top: var(--space-3); }
+.resource .tabs .tab {
+    height: var(--control-sm);
+    padding: 0 var(--space-3);
+    font-size: 12px;
+    color: var(--text-primary);
+    background: var(--surface-1);
+    border: 1px solid var(--border-default);
+    cursor: pointer;
+}
+
+.graph, .small, .composition { margin: var(--space-3) 0 0; }
+.graph figcaption, .small figcaption, .composition figcaption {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin-bottom: 2px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.plot { position: relative; height: 200px; background: var(--bg-sunken); border: 1px solid var(--line); }
+.small .plot { height: 72px; }
+.plot svg, .spark svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.graph .ends { display: flex; justify-content: space-between; margin-top: 2px; font-size: 11px; color: var(--text-muted); }
+.plot .grid, .spark .grid { stroke: var(--line); stroke-opacity: 0.2; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.spark .grid { display: none; }
+.plot polyline, .spark polyline {
+    fill: none;
+    stroke: var(--line);
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    vector-effect: non-scaling-stroke;
+}
+.plot .fill, .spark .fill { fill: var(--line); fill-opacity: 0.15; stroke: none; }
+.plot polyline.k-disk-2, .plot polyline.k-net-2, .spark polyline.k-net-2 { stroke-dasharray: 4 3; }
+.each { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--space-2); }
+
+.composition svg { display: block; width: 100%; height: 22px; background: var(--bg-sunken); border: 1px solid var(--border-default); }
+.composition rect { fill: var(--line); }
+.composition rect.k-free { fill: none; }
+
+.legend { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); margin: var(--space-2) 0 0; padding: 0; list-style: none; font-size: 12px; color: var(--text-secondary); }
+.legend li::before { content: ""; display: inline-block; width: 14px; height: 3px; margin-right: var(--space-1); vertical-align: middle; background: var(--line); }
+.legend .k-disk-2::before, .legend .k-net-2::before { background: repeating-linear-gradient(90deg, var(--line) 0 4px, transparent 4px 7px); }
+.legend .k-free::before { height: 8px; background: none; border: 1px solid var(--line); box-sizing: border-box; }
+
+.facts {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr);
+    gap: var(--space-2) var(--space-4);
+    margin: var(--space-4) 0 0;
+    font-size: 13px;
+}
+.facts dt { color: var(--text-muted); }
+.facts dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.resource .note { margin: var(--space-4) 0 0; font-size: 12px; color: var(--text-muted); }
+
 .more, .said { margin: var(--space-2) var(--space-3); font-size: 12px; color: var(--text-muted); }
 .said { flex: none; color: var(--text-secondary); }
 .said + .said { margin-top: calc(-1 * var(--space-1)); }
@@ -214,6 +319,10 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent-soli
     .sessions .head, .sessions .entries button { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 70px; }
     .sessions .head span:nth-child(3), .sessions .entries .since { display: none; }
     .details { width: 260px; }
+    .resources { width: 200px; }
+    .resources .item { grid-template-columns: 56px minmax(0, 1fr); }
+    .facts { grid-template-columns: max-content minmax(0, 1fr); }
+    .plot { height: 160px; }
 }
 @media (max-width: 560px) {
     .details { width: 50%; }
@@ -222,4 +331,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent-soli
     .sessions .head, .sessions .entries button { grid-template-columns: minmax(0, 1fr) 56px; }
     .sessions .head span:nth-child(2), .sessions .entries .kind { display: none; }
     .head .sort:nth-child(2), .entries .pid, .head .sort:nth-last-child(2), .entries .num:nth-last-child(2) { display: none; }
+    .resources { width: 38%; }
+    .resources .item { grid-template-columns: minmax(0, 1fr); }
+    .resources .spark { display: none; }
+    .resource { padding: var(--space-3); }
 }

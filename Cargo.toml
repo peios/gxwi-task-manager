@@ -26,3 +26,7 @@ libauthd-policy = { path = "../authd/libauthd-policy" }
 libc = "0.2"
 # When someone signed in, on this machine's clock.
 jiff = "0.2.29"
+
+[dev-dependencies]
+# The events a window is sent carry a JSON value, which libgxwi re-exports.
+serde_json = "1"

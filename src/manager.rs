@@ -19,6 +19,7 @@ use peios::security::Sid;
 use libauthd_client::logon::Logon;
 use peios::token::LogonSessionInfo;
 
+use crate::perf::{self, Perf};
 use crate::procs::{self, Closed, Proc};
 use crate::{ending, words};
 
@@ -46,6 +47,8 @@ pub struct Manager {
     doing: Doing,
     /// What came of the last thing done: what was done, or why it wasn't.
     said: Option<Result<String, String>>,
+    /// The machine as a whole, over the last two minutes.
+    perf: Perf,
 }
 
 /// What is being done to the picked process.
@@ -76,6 +79,8 @@ pub struct Seen {
     pub cpu: Option<f64>,
     /// Memory: total, and available.
     pub memory: Option<(u64, u64)>,
+    /// The machine as a whole, for the Performance view.
+    pub machine: perf::Look,
     pub services: Result<Vec<Summary>, String>,
     pub jobs: Result<Vec<SubmittedJob>, String>,
     /// The main processes of services, for a process whose own cgroup is
@@ -99,6 +104,7 @@ impl Default for Seen {
             shares: HashMap::new(),
             cpu: None,
             memory: None,
+            machine: perf::Look::default(),
             services: Ok(Vec::new()),
             jobs: Ok(Vec::new()),
             mains: HashMap::new(),
@@ -115,6 +121,7 @@ impl Default for Seen {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Processes,
+    Performance,
     Jobs,
     SignedIn,
 }
@@ -166,7 +173,10 @@ enum Group {
 
 impl Manager {
     pub fn new(seen: Seen) -> Manager {
+        let mut perf = Perf::default();
+        perf.heard(seen.machine.clone());
         Manager {
+            perf,
             window: Weak::new(),
             seen,
             view: View::Processes,
@@ -189,6 +199,7 @@ impl Manager {
     }
 
     pub fn heard(&mut self, seen: Seen) {
+        self.perf.heard(seen.machine.clone());
         self.seen = seen;
         // The picked process's service may have changed state since.
         if let Some(pid) = self.picked {
@@ -1179,8 +1190,9 @@ impl Live for Manager {
             )
         };
         let views = format!(
-            "<div class=\"tabs\" role=\"group\" aria-label=\"Show\">{}{}{}</div>",
+            "<div class=\"tabs\" role=\"group\" aria-label=\"Show\">{}{}{}{}</div>",
             view(View::Processes, "Processes"),
+            view(View::Performance, "Performance"),
             view(View::Jobs, "Jobs"),
             view(View::SignedIn, "Signed in"),
         );
@@ -1201,6 +1213,14 @@ impl Live for Manager {
                 memory = sorter(Sort::Memory, "Memory", "memory"),
                 listing = self.listing(facts.fields),
                 details = self.details(),
+                footer = self.footer(),
+            ),
+            View::Performance => format!(
+                "<div class=\"bar\">{views}{refresh}</div><div class=\"body perf\">{}</div>{footer}",
+                self.perf.render(
+                    self.seen.procs.iter().filter(|p| !Self::kernel(p)).count(),
+                    self.seen.uptime,
+                ),
                 footer = self.footer(),
             ),
             View::Jobs => format!(
@@ -1231,6 +1251,7 @@ impl Live for Manager {
             "view" => {
                 self.view = match by {
                     "Signed in" => View::SignedIn,
+                    "Performance" => View::Performance,
                     "Jobs" => View::Jobs,
                     _ => View::Processes,
                 };
@@ -1281,6 +1302,9 @@ impl Live for Manager {
                 if let Some(pid) = value["pid"].as_str().and_then(|pid| pid.parse().ok()) {
                     self.pick(pid);
                 }
+            }
+            "pick-resource" | "cpu-graph" => {
+                self.perf.event(name, value);
             }
             // What is read in the background, read now.
             "refresh" => {

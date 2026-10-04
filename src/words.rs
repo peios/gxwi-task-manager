@@ -25,6 +25,33 @@ pub fn bytes(n: u64) -> String {
     }
 }
 
+/// A disk's speed, from bytes a second.
+pub fn bytes_per_second(n: f64) -> String {
+    if n < 1024.0 { format!("{n:.0} B/s") } else { format!("{}/s", bytes(n as u64)) }
+}
+
+/// A network's speed, from bytes a second, said in bits as networks are:
+/// in thousands, not 1024s.
+pub fn bits_per_second(bytes: f64) -> String {
+    const UNITS: [&str; 4] = ["Kbps", "Mbps", "Gbps", "Tbps"];
+    let bits = bytes * 8.0;
+    if bits < 1000.0 {
+        return format!("{bits:.0} bps");
+    }
+    let mut value = bits / 1000.0;
+    let mut unit = 0;
+    while value >= 1000.0 && unit + 1 < UNITS.len() {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if value < 10.0 { format!("{value:.1} {}", UNITS[unit]) } else { format!("{value:.0} {}", UNITS[unit]) }
+}
+
+/// A processor's speed, from megahertz.
+pub fn ghz(mhz: f64) -> String {
+    format!("{:.2} GHz", mhz / 1000.0)
+}
+
 /// A CPU share, in percent.
 pub fn share(percent: f64) -> String {
     if percent < 0.05 {

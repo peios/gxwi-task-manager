@@ -18,6 +18,7 @@ use peios::token::Session;
 
 mod ending;
 mod manager;
+mod perf;
 mod procs;
 mod words;
 
@@ -41,6 +42,8 @@ struct Looker {
     /// Which service peinit said a process was the main process of, for the
     /// processes whose own cgroup is closed to the person. Asked once each.
     mains: HashMap<u32, Option<String>>,
+    /// The machine as a whole: its counters, for the next look's speeds.
+    perf: perf::Reader,
 }
 
 static LOOKER: Mutex<Option<Looker>> = Mutex::new(None);
@@ -53,6 +56,7 @@ fn look() -> Seen {
         machine: None,
         names: Names::new(),
         mains: HashMap::new(),
+        perf: perf::Reader::default(),
     });
     let procs = procs::read_all();
     let machine = procs::machine_ticks();
@@ -139,6 +143,7 @@ fn look() -> Seen {
         shares,
         cpu,
         memory: procs::memory(),
+        machine: looker.perf.look(),
         services,
         jobs,
         mains: looker.mains.iter().filter_map(|(pid, s)| Some((*pid, s.clone()?))).collect(),

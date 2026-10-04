@@ -336,6 +336,7 @@ dependencies = [
  "libgxwi",
  "peinit2",
  "peios",
+ "serde_json",
 ]
 
 [[package]]
