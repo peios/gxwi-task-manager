@@ -173,7 +173,7 @@ impl Manager {
             session: None,
             job_picked: None,
             may_sign_out: None,
-            grouping: Grouping::Service,
+            grouping: Grouping::None,
             sort: Sort::Name,
             picked: None,
             command: None,
@@ -1323,12 +1323,23 @@ mod tests {
     }
 
     #[test]
+    fn processes_are_listed_together_until_grouped() {
+        let m = window(vec![proc(10, "sshd", Some("sshd"), Some("S-1-5-18")), proc(12, "bash", None, None)]);
+        assert_eq!(m.grouping, Grouping::None);
+        let listing = m.listing(&Fields::default());
+        assert!(!listing.contains("<small>"), "{listing}");
+        assert!(listing.contains("<span class=\"name\">sshd</span>"), "{listing}");
+        assert!(listing.contains("<span class=\"name\">bash</span>"), "{listing}");
+    }
+
+    #[test]
     fn processes_group_under_their_service_and_the_rest_say_where_they_are() {
-        let m = window(vec![
+        let mut m = window(vec![
             proc(10, "sshd", Some("sshd"), Some("S-1-5-18")),
             proc(11, "sshd", Some("sshd"), Some("S-1-5-18")),
             proc(12, "bash", None, None),
         ]);
+        m.grouping = Grouping::Service;
         let fields = Fields::default();
         let listing = m.listing(&fields);
         assert!(listing.contains("sshd <small>2</small>"), "{listing}");
@@ -1353,6 +1364,7 @@ mod tests {
         closed.owner = Err(Closed::Protected);
         let mut m = window(vec![closed]);
         m.seen.mains.insert(20, "authd".into());
+        m.grouping = Grouping::Service;
         let listing = m.listing(&Fields::default());
         assert!(listing.contains("authd <small>1</small>"), "{listing}");
         assert!(listing.contains("<span class=\"name\">authd</span>"), "{listing}");
