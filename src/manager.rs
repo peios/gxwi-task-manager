@@ -130,8 +130,10 @@ impl Manager {
     fn name(&self, p: &Proc) -> String {
         match &p.stat {
             Ok(stat) => stat.name.clone(),
+            // The first process is always init, which is peinit.
+            Err(_) if p.pid == 1 => "peinit".into(),
             Err(_) => match self.seen.mains.get(&p.pid) {
-                Some(service) => service.clone(),
+                Some(service) => self.service(service).and_then(|s| s.display_name.clone()).unwrap_or_else(|| service.clone()),
                 None if p.psb.is_some_and(|psb| psb.is_protected()) => "Protected process".into(),
                 None => "Process you can't see".into(),
             },
@@ -174,7 +176,7 @@ impl Manager {
                 Some(CgroupMember::Job(id)) => Group::Job(id.clone()),
                 None => match self.seen.mains.get(&p.pid) {
                     Some(service) => Group::Service(service.clone()),
-                    None if p.stat.is_ok() => Group::Elsewhere,
+                    None if p.stat.is_ok() || p.pid == 1 => Group::Elsewhere,
                     None => Group::Unknown,
                 },
             },
@@ -215,8 +217,19 @@ impl Manager {
                 None => (name.clone(), format!("Service {name}")),
             },
             Group::Job(id) => match self.job(id) {
-                Some(job) if !job.description.is_empty() => (job.description.clone(), "Job".into()),
-                _ => ("A job".into(), format!("Job {id}")),
+                Some(job) => {
+                    let title = if job.description.is_empty() { "A job".into() } else { job.description.clone() };
+                    let runs_as = job
+                        .identity
+                        .parse::<Sid>()
+                        .ok()
+                        .and_then(|sid| self.seen.names.get(&sid).cloned())
+                        .map_or_else(|| "Job".to_string(), |name| format!("Job · runs as {name}"));
+                    (title, runs_as)
+                }
+                // peinit lists a job only to whoever may query it, which by
+                // default is who submitted it and Administrators.
+                None => ("A job".into(), "peinit doesn't tell you which: only who submitted it may ask".into()),
             },
             Group::Elsewhere => ("Not in a service".into(), "Started by peinit itself, or before it".into()),
             Group::Unknown => (
@@ -363,8 +376,12 @@ impl Manager {
             }
             Err(why) => note = format!("<p class=\"note\">{}</p>", escape(words::closed(*why))),
         }
+        // Where the whole process is closed, why is said once, above, and
+        // not again beside each thing it closes.
+        let said = p.stat.as_ref().err().copied();
         if let Some((for_pid, command)) = &self.command
             && *for_pid == pid
+            && !matches!((command, said), (Err(why), Some(also)) if *why == also)
         {
             facts.push((
                 "Command".into(),
@@ -386,7 +403,10 @@ impl Manager {
             }
             None => {
                 if let Some(service) = self.seen.mains.get(&pid) {
-                    facts.push(("Belongs to".into(), format!("{} — its main process", escape(service))));
+                    let shown = self.service(service).and_then(|s| s.display_name.clone()).unwrap_or_else(|| service.clone());
+                    facts.push(("Belongs to".into(), format!("{} — its main process", escape(&shown))));
+                } else if pid == 1 {
+                    facts.push(("Belongs to".into(), "Nothing: it is the service manager, which starts every service".into()));
                 }
             }
         }
@@ -402,6 +422,7 @@ impl Manager {
                     facts.push(("Integrity".into(), escape(&words::integrity(level))));
                 }
             }
+            Err(why) if Some(*why) == said => {}
             Err(why) => facts.push(("Runs as".into(), format!("<span class=\"unsaid\">{}</span>", escape(words::closed(*why))))),
         }
         let mut mitigations = String::new();
@@ -444,7 +465,8 @@ impl Manager {
 
     fn pick(&mut self, pid: u32) {
         self.picked = Some(pid);
-        self.command = Some((pid, procs::command_line(pid)));
+        let protected = self.proc(pid).and_then(|p| p.psb).is_some_and(|psb| psb.is_protected());
+        self.command = Some((pid, procs::command_line(pid, protected)));
     }
 }
 

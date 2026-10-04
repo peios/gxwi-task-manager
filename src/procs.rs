@@ -155,8 +155,8 @@ fn owner(pid: u32, protected: bool) -> Result<Owner, Closed> {
 
 /// A process's command line, read when it is picked: it needs
 /// `PROCESS_QUERY_INFORMATION`, and is long.
-pub fn command_line(pid: u32) -> Result<String, Closed> {
-    let bytes = fs::read(format!("/proc/{pid}/cmdline")).map_err(|e| Closed::of(&e, false))?;
+pub fn command_line(pid: u32, protected: bool) -> Result<String, Closed> {
+    let bytes = fs::read(format!("/proc/{pid}/cmdline")).map_err(|e| Closed::of(&e, protected))?;
     let words: Vec<String> = bytes
         .split(|&b| b == 0)
         .filter(|word| !word.is_empty())

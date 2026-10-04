@@ -95,7 +95,7 @@ fn look() -> Seen {
                 && let Some(pid) = status.job.and_then(|job| job.pid)
                 && unknown.contains(&pid)
             {
-                looker.mains.insert(pid, Some(summary.display_name.clone().unwrap_or_else(|| summary.service.clone())));
+                looker.mains.insert(pid, Some(summary.service.clone()));
             }
         }
         for pid in unknown {
@@ -105,9 +105,20 @@ fn look() -> Seen {
 
     let mut names = HashMap::new();
     for owner in procs.iter().filter_map(|p| p.owner.as_ref().ok()) {
-        if !names.contains_key(&owner.user) {
+        names.entry(owner.user).or_insert_with(|| {
             looker.names.learn(&owner.user);
-            names.insert(owner.user, looker.names.of(&owner.user));
+            looker.names.of(&owner.user)
+        });
+    }
+    // A service runs as a SID made from its name, which nobody holds a
+    // name for: it is called by the service.
+    if let Ok(services) = &services {
+        for summary in services {
+            if let Some(sid) = libauthd_policy::service_sid::of(&summary.service)
+                && names.get(&sid).is_some_and(|name| *name == sid.to_string())
+            {
+                names.insert(sid, format!("{} service", summary.service));
+            }
         }
     }
 
