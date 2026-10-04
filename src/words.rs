@@ -102,6 +102,30 @@ pub fn package(name: &str) -> String {
     }
 }
 
+/// A submitted job's state, as PSPU §7 names it.
+pub fn job_state(state: &str) -> &'static str {
+    match state {
+        "created" => "Starting",
+        "running" => "Running",
+        "completed" => "Finished",
+        "failed" => "Failed",
+        "abandoned" => "Abandoned",
+        _ => "Unknown",
+    }
+}
+
+/// How far a job says it has got.
+pub fn progress(progress: &peinit::client::Progress) -> String {
+    let unit = progress.unit.as_deref().map(|unit| format!(" {unit}")).unwrap_or_default();
+    match progress.total {
+        Some(total) if progress.bounded && total > 0 => {
+            format!("{}%", progress.current.saturating_mul(100) / total)
+        }
+        Some(total) => format!("{} of {total}{unit}", progress.current),
+        None => format!("{}{unit}", progress.current),
+    }
+}
+
 /// Why a call failed, in words, for the errors a person can act on.
 pub fn io_error(error: &std::io::Error) -> String {
     match error.raw_os_error() {

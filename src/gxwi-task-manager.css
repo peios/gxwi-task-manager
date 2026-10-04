@@ -124,6 +124,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent-soli
 /* Who is signed in. */
 .sessions .head, .sessions .entries button { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr) 80px; }
 .head .right { text-align: right; }
+.jobs .head, .jobs .entries button { grid-template-columns: minmax(0, 1.6fr) 90px minmax(0, 1fr) 80px; }
 .entries .kind, .entries .since { font-size: 12px; }
 .details .plain .pid { margin-left: var(--space-1); font: 500 11px/1.4 var(--font-mono); color: var(--text-muted); }
 

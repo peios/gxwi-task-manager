@@ -27,6 +27,8 @@ pub struct Manager {
     view: View,
     /// The signed-in session picked, by its id.
     session: Option<u64>,
+    /// The job picked, by its id.
+    job_picked: Option<String>,
     grouping: Grouping,
     sort: Sort,
     picked: Option<u32>,
@@ -107,6 +109,7 @@ impl Default for Seen {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Processes,
+    Jobs,
     SignedIn,
 }
 
@@ -162,6 +165,7 @@ impl Manager {
             seen,
             view: View::Processes,
             session: None,
+            job_picked: None,
             grouping: Grouping::Service,
             sort: Sort::Name,
             picked: None,
@@ -663,6 +667,24 @@ impl Manager {
     }
 
     fn act(&mut self, name: &str) {
+        // A job picked in Jobs is stopped from its own pane.
+        if self.view == View::Jobs {
+            match name {
+                "stop-job" => {
+                    self.said = None;
+                    self.doing = Doing::AskingStopJob;
+                }
+                "stop-job-confirm" => {
+                    self.doing = Doing::Looking;
+                    if let Some(id) = self.job_picked.clone() {
+                        self.stop_job(&id);
+                    }
+                }
+                "cancel" => self.doing = Doing::Looking,
+                _ => {}
+            }
+            return;
+        }
         let Some(pid) = self.picked else { return };
         match name {
             "end" => {
@@ -711,13 +733,7 @@ impl Manager {
                 self.doing = Doing::Looking;
                 let id = self.proc(pid).and_then(|p| self.job_of(p)).map(|job| job.id.clone());
                 if let Some(id) = id {
-                    let done = ControlClient::connect_default()
-                        .map_err(|e| e.to_string())
-                        .and_then(|mut client| client.job_stop(&id).map_err(|e| e.to_string()));
-                    self.said = Some(match done {
-                        Ok(_) => Ok("Asked peinit to stop its job.".into()),
-                        Err(why) => Err(format!("Its job couldn't be stopped: {why}")),
-                    });
+                    self.stop_job(&id);
                 }
             }
             "cancel" => self.doing = Doing::Looking,
@@ -896,6 +912,138 @@ impl Manager {
     }
 }
 
+impl Manager {
+    fn jobs_listing(&self, fields: &Fields) -> String {
+        let jobs = match &self.seen.jobs {
+            Ok(jobs) => jobs,
+            Err(why) => return format!("<p class=\"more\">peinit couldn't be asked for its jobs: {}</p>", escape(why)),
+        };
+        let filter = fields.get("filter").trim().to_lowercase();
+        let mut shown: Vec<&SubmittedJob> = jobs
+            .iter()
+            .filter(|job| {
+                filter.is_empty()
+                    || job.description.to_lowercase().contains(&filter)
+                    || job.image_path.to_lowercase().contains(&filter)
+                    || self.sid_name(&job.identity).to_lowercase().contains(&filter)
+            })
+            .collect();
+        if shown.is_empty() {
+            return "<p class=\"more\">No job that you may see.</p>".into();
+        }
+        shown.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        let rows: String = shown
+            .iter()
+            .map(|job| {
+                format!(
+                    "<li><button type=\"button\" fx-click=\"pick-job\" fx-value-id=\"{id}\" aria-selected=\"{picked}\"{off}>\
+                     <span class=\"name\">{what}</span><span class=\"kind\">{state}</span><span class=\"owner\">{who}</span>\
+                     <span class=\"num\">{progress}</span></button></li>",
+                    id = escape(&job.id),
+                    picked = self.job_picked.as_deref() == Some(job.id.as_str()),
+                    off = if job.state == "running" || job.state == "created" { "" } else { " class=\"off\"" },
+                    what = escape(&job_title(job)),
+                    state = words::job_state(&job.state),
+                    who = escape(&self.sid_name(&job.identity)),
+                    progress = job.progress.as_ref().map(words::progress).unwrap_or_default(),
+                )
+            })
+            .collect();
+        format!("<ul class=\"entries\">{rows}</ul>")
+    }
+
+    /// What a SID string is called, as far as is known.
+    fn sid_name(&self, sid: &str) -> String {
+        sid.parse::<Sid>().ok().and_then(|sid| self.seen.names.get(&sid).cloned()).unwrap_or_else(|| sid.to_string())
+    }
+
+    fn jobs_notes(&self) -> String {
+        "<p class=\"said\" role=\"status\">peinit lists only the jobs you may see: by default, those you asked \
+         for, and every job to Administrators. One that ended stays a minute.</p>"
+            .into()
+    }
+
+    fn job_details(&self) -> String {
+        let Some(id) = &self.job_picked else {
+            return "<aside class=\"details\"><p class=\"more\">Pick a job to see it in full.</p></aside>".into();
+        };
+        let Some(job) = self.job(id) else {
+            return "<aside class=\"details\"><h2>A job</h2><p class=\"note\">It has gone: peinit keeps an ended job for a minute.</p></aside>".into();
+        };
+        let mut facts: Vec<(String, String)> = vec![("State".into(), words::job_state(&job.state).into())];
+        if let Some(text) = &job.status_text {
+            facts.push(("Says".into(), escape(text)));
+        }
+        if let Some(progress) = &job.progress {
+            facts.push(("Progress".into(), escape(&words::progress(progress))));
+        }
+        facts.push(("Program".into(), format!("<code>{}</code>", escape(&job.image_path))));
+        if let Some(pid) = job.pid.filter(|pid| self.proc(*pid).is_some()) {
+            facts.push((
+                "Process".into(),
+                format!("<button type=\"button\" class=\"link\" fx-click=\"show-process\" fx-value-pid=\"{pid}\">{pid}</button>"),
+            ));
+        }
+        facts.push(("Runs as".into(), escape(&self.sid_name(&job.identity))));
+        facts.push(("Asked for by".into(), escape(&self.sid_name(&job.submitter))));
+        for (label, at) in [("Started", &job.started_at), ("Ended", &job.ended_at)] {
+            if let Some(at) = at.as_deref().and_then(|at| at.parse::<jiff::Timestamp>().ok()) {
+                facts.push((label.into(), escape(&words::when(at.into()))));
+            }
+        }
+        if let Some(code) = job.exit_code {
+            facts.push(("Exit code".into(), code.to_string()));
+        }
+        if let Some(signal) = job.exit_signal {
+            facts.push(("Ended by signal".into(), signal.to_string()));
+        }
+        let running = job.state == "running" || job.state == "created";
+        let action = match &self.doing {
+            Doing::AskingStopJob if running => format!(
+                "<div class=\"asking\"><p>Stop {}? Everything in it ends.</p>\
+                 <button type=\"button\" class=\"danger\" fx-click=\"stop-job-confirm\">Stop job</button>\
+                 <button type=\"button\" fx-click=\"cancel\">Cancel</button></div>",
+                escape(&format!("“{}”", job_title(job))),
+            ),
+            _ if !running => String::new(),
+            _ if job.granted.iter().any(|right| right == "stop") => {
+                "<div class=\"actions\"><button type=\"button\" fx-click=\"stop-job\">Stop job</button></div>".into()
+            }
+            _ => "<p class=\"may\">Its permissions don't let you stop it.</p>".into(),
+        };
+        let said = match &self.said {
+            Some(Ok(done)) => format!("<p class=\"note\" role=\"status\">{}</p>", escape(done)),
+            Some(Err(why)) => format!("<p class=\"note bad\" role=\"alert\">{}</p>", escape(why)),
+            None => String::new(),
+        };
+        let dl: String = facts.iter().map(|(k, v)| format!("<dt>{k}</dt><dd>{v}</dd>")).collect();
+        format!(
+            "<aside class=\"details\"><h2>{title}</h2><p class=\"id\">Job {id}</p>{said}{action}<dl>{dl}</dl></aside>",
+            title = escape(&job_title(job)),
+            id = escape(&job.id),
+        )
+    }
+
+    fn stop_job(&mut self, id: &str) {
+        let done = ControlClient::connect_default()
+            .map_err(|e| e.to_string())
+            .and_then(|mut client| client.job_stop(id).map_err(|e| e.to_string()));
+        self.said = Some(match done {
+            Ok(_) => Ok("Asked peinit to stop the job.".into()),
+            Err(why) => Err(format!("The job couldn't be stopped: {why}")),
+        });
+    }
+}
+
+/// What a job is called: its description, or its program.
+fn job_title(job: &SubmittedJob) -> String {
+    if job.description.is_empty() {
+        job.image_path.rsplit('/').next().unwrap_or("A job").to_string()
+    } else {
+        job.description.clone()
+    }
+}
+
 impl Live for Manager {
     fn render(&self, facts: &Facts) -> String {
         let tab = |grouping: Grouping, label: &str| {
@@ -917,8 +1065,9 @@ impl Live for Manager {
             )
         };
         let views = format!(
-            "<div class=\"tabs\" role=\"group\" aria-label=\"Show\">{}{}</div>",
+            "<div class=\"tabs\" role=\"group\" aria-label=\"Show\">{}{}{}</div>",
             view(View::Processes, "Processes"),
+            view(View::Jobs, "Jobs"),
             view(View::SignedIn, "Signed in"),
         );
         let refresh = "<button type=\"button\" fx-click=\"refresh\" fx-key=\"F5\" title=\"Read again (F5)\">Refresh</button>";
@@ -940,6 +1089,15 @@ impl Live for Manager {
                 details = self.details(),
                 footer = self.footer(),
             ),
+            View::Jobs => format!(
+                "<div class=\"bar\">{views}\
+                 <input name=\"filter\" autocomplete=\"off\" spellcheck=\"false\" placeholder=\"Find by description, program or person\" aria-label=\"Find\">{refresh}</div>{notes}\
+                 <div class=\"body\"><div class=\"list jobs\"><div class=\"head\"><span>Job</span><span>State</span><span>Runs as</span><span class=\"right\">Progress</span></div>{listing}</div>{details}</div>{footer}",
+                notes = self.jobs_notes(),
+                listing = self.jobs_listing(facts.fields),
+                details = self.job_details(),
+                footer = self.footer(),
+            ),
             View::SignedIn => format!(
                 "<div class=\"bar\">{views}\
                  <input name=\"filter\" autocomplete=\"off\" spellcheck=\"false\" placeholder=\"Find by person or session\" aria-label=\"Find\">\
@@ -957,7 +1115,22 @@ impl Live for Manager {
         let by = value["by"].as_str().unwrap_or("");
         match name {
             "view" => {
-                self.view = if by == "Signed in" { View::SignedIn } else { View::Processes };
+                self.view = match by {
+                    "Signed in" => View::SignedIn,
+                    "Jobs" => View::Jobs,
+                    _ => View::Processes,
+                };
+                self.doing = Doing::Looking;
+                self.said = None;
+            }
+            "pick-job" => {
+                if let Some(id) = value["id"].as_str() {
+                    if self.job_picked.as_deref() != Some(id) {
+                        self.doing = Doing::Looking;
+                        self.said = None;
+                    }
+                    self.job_picked = Some(id.to_string());
+                }
             }
             "pick-session" => {
                 if let Some(id) = value["id"].as_str().and_then(|id| id.parse().ok()) {
