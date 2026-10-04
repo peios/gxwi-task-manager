@@ -130,10 +130,18 @@ pub fn read_all() -> Vec<Proc> {
 pub fn read_one(pid: u32) -> Option<Proc> {
     let psb = Process::psb(Some(pid)).ok();
     let protected = psb.is_some_and(|psb| psb.is_protected());
-    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+    let mut stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(line) => parse_stat(&line).ok_or(Closed::Unreadable),
         Err(e) => Err(Closed::of(&e, protected)),
     };
+    // The kernel keeps 15 bytes of a name. Where that is all there is, the
+    // program's own name is read from its command line, if the person may.
+    if let Ok(stat) = &mut stat
+        && stat.name.len() == 15
+        && let Some(full) = full_name(pid, &stat.name)
+    {
+        stat.name = full;
+    }
     if stat == Err(Closed::Gone) {
         return None;
     }
@@ -141,6 +149,19 @@ pub fn read_one(pid: u32) -> Option<Proc> {
         .ok()
         .and_then(|text| cgroup_member(&text));
     Some(Proc { pid, stat, member, owner: owner(pid, protected), psb })
+}
+
+/// The program's name from the first word of its command line, where it
+/// begins with the 15 bytes the kernel kept.
+fn full_name(pid: u32, short: &str) -> Option<String> {
+    let bytes = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let first = bytes.split(|&b| b == 0).next()?;
+    full_from_argv0(&String::from_utf8_lossy(first), short)
+}
+
+pub fn full_from_argv0(argv0: &str, short: &str) -> Option<String> {
+    let base = argv0.rsplit('/').next()?;
+    (base.len() > short.len() && base.starts_with(short)).then(|| base.to_string())
 }
 
 fn owner(pid: u32, protected: bool) -> Result<Owner, Closed> {
@@ -233,6 +254,17 @@ mod tests {
         let line = "15 (ksoftirqd/0) S 2 0 0 0 -1 69238848 0 0 0 0 0 4 0 0 20 0 1 0 3 0 0 \
                     18446744073709551615 0 0 0 0 0 0 0 2147483647 0 0 0 0 17 0 0 0 0 0 0";
         assert!(parse_stat(line).unwrap().kernel);
+    }
+
+    #[test]
+    fn a_cut_name_is_made_whole_from_the_command_line_only_where_it_agrees() {
+        assert_eq!(
+            full_from_argv0("/usr/bin/gxwi-task-manager", "gxwi-task-manag"),
+            Some("gxwi-task-manager".into())
+        );
+        // A program that renamed itself, or an argv[0] that says something else.
+        assert_eq!(full_from_argv0("sshd: /usr/sbin/sshd -D", "sshd"), None);
+        assert_eq!(full_from_argv0("/usr/bin/other-program-name", "gxwi-task-manag"), None);
     }
 
     #[test]

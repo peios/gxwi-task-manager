@@ -9,11 +9,14 @@
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
 use std::sync::Weak;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use libgxwi::{Facts, Fields, Live, Surface, Value, escape};
-use peinit::client::{CgroupMember, SubmittedJob, Summary};
+use peinit::client::{
+    Admission, CgroupMember, Command, ControlClient, Status, SubmittedJob, Summary, admission,
+};
 use peios::security::Sid;
+use peios::token::LogonSessionInfo;
 
 use crate::procs::{self, Closed, Proc};
 use crate::{ending, words};
@@ -21,6 +24,9 @@ use crate::{ending, words};
 pub struct Manager {
     pub window: Weak<Surface<Manager>>,
     seen: Seen,
+    view: View,
+    /// The signed-in session picked, by its id.
+    session: Option<u64>,
     grouping: Grouping,
     sort: Sort,
     picked: Option<u32>,
@@ -28,6 +34,9 @@ pub struct Manager {
     command: Option<(u32, Result<String, Closed>)>,
     /// Whether this person may end the picked process, or why not.
     may_end: Option<(u32, Result<(), String>)>,
+    /// The picked process's service as peinit says it is now: its main
+    /// process, its state, and what this person may do to it.
+    status: Option<(u32, String, Result<Status, String>)>,
     doing: Doing,
     /// What came of the last thing done: what was done, or why it wasn't.
     said: Option<Result<String, String>>,
@@ -38,6 +47,10 @@ enum Doing {
     Looking,
     /// Asking before it is ended.
     AskingEnd,
+    /// Asking before its service is stopped.
+    AskingStopService,
+    /// Asking before its job is stopped.
+    AskingStopJob,
     /// Asked to end, through a handle held on it since.
     Ending { pid: u32, pidfd: OwnedFd, since: Instant },
 }
@@ -62,6 +75,9 @@ pub struct Seen {
     pub mains: HashMap<u32, String>,
     /// What the people processes run as are called.
     pub names: HashMap<Sid, String>,
+    /// The kernel's list of logon sessions, or why it couldn't be read: it
+    /// is Administrators' and SYSTEM's.
+    pub sessions: Result<Vec<LogonSessionInfo>, String>,
     /// Seconds since the machine started, and clock ticks a second.
     pub uptime: Option<f64>,
     pub ticks_per_second: u64,
@@ -79,11 +95,30 @@ impl Default for Seen {
             jobs: Ok(Vec::new()),
             mains: HashMap::new(),
             names: HashMap::new(),
+            sessions: Ok(Vec::new()),
             uptime: None,
             ticks_per_second: 100,
             page_size: 4096,
         }
     }
+}
+
+/// Which list is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Processes,
+    SignedIn,
+}
+
+/// One signed-in session, with what is known of it: everything, from the
+/// kernel's list, or only what the person's own processes say of it.
+struct Signed {
+    id: u64,
+    user: Sid,
+    logon_type: Option<u32>,
+    package: Option<String>,
+    created: Option<SystemTime>,
+    pids: Vec<u32>,
 }
 
 /// How the processes are grouped.
@@ -125,11 +160,14 @@ impl Manager {
         Manager {
             window: Weak::new(),
             seen,
+            view: View::Processes,
+            session: None,
             grouping: Grouping::Service,
             sort: Sort::Name,
             picked: None,
             command: None,
             may_end: None,
+            status: None,
             doing: Doing::Looking,
             said: None,
         }
@@ -141,6 +179,40 @@ impl Manager {
 
     pub fn heard(&mut self, seen: Seen) {
         self.seen = seen;
+        // The picked process's service may have changed state since.
+        if let Some(pid) = self.picked {
+            self.status = self.service_of(pid).map(|name| (pid, name.clone(), ask_status(&name)));
+        }
+    }
+
+    /// The service the process `pid` belongs to, if it belongs to one.
+    fn service_of(&self, pid: u32) -> Option<String> {
+        match &self.proc(pid)?.member {
+            Some(CgroupMember::Service { service, .. }) => Some(service.clone()),
+            Some(CgroupMember::Job(_)) => None,
+            None => self.seen.mains.get(&pid).cloned(),
+        }
+    }
+
+    /// The picked process's service's status, if it is `pid`'s.
+    fn status_for(&self, pid: u32) -> Option<&Result<Status, String>> {
+        self.status.as_ref().filter(|(at, ..)| *at == pid).map(|(_, _, status)| status)
+    }
+
+    /// Whether `pid` is its service's main process, by peinit's word.
+    fn is_main(&self, pid: u32) -> bool {
+        self.status_for(pid)
+            .and_then(|status| status.as_ref().ok())
+            .and_then(|status| status.job.as_ref()?.pid)
+            == Some(pid)
+    }
+
+    /// The job the process `p` belongs to, as peinit lists it to this person.
+    fn job_of(&self, p: &Proc) -> Option<&SubmittedJob> {
+        match &p.member {
+            Some(CgroupMember::Job(id)) => self.job(id),
+            _ => None,
+        }
     }
 
     fn proc(&self, pid: u32) -> Option<&Proc> {
@@ -417,7 +489,8 @@ impl Manager {
         match &p.member {
             Some(CgroupMember::Service { service, part }) => {
                 let shown = self.service(service).and_then(|s| s.display_name.clone()).unwrap_or_else(|| service.clone());
-                facts.push(("Belongs to".into(), format!("{} — {}", escape(&shown), words::part(*part))));
+                let which = if self.is_main(pid) { "its main process" } else { words::part(*part) };
+                facts.push(("Belongs to".into(), format!("{} — {}", escape(&shown), which)));
             }
             Some(CgroupMember::Job(id)) => {
                 let what = self.job(id).map(|j| j.description.clone()).filter(|d| !d.is_empty());
@@ -496,16 +569,7 @@ impl Manager {
         let kernel = self.proc(pid).is_some_and(Self::kernel);
         self.command = Some((pid, procs::command_line(pid, protected)));
         self.may_end = Some((pid, ending::may_end(pid, protected, kernel)));
-    }
-
-    /// Whether the picked process is a service's main process, which peinit
-    /// restarts by its policy when it ends unasked.
-    fn main_of_service(&self, p: &Proc) -> Option<String> {
-        match &p.member {
-            Some(CgroupMember::Service { service, part: Some(peinit::client::ServicePart::Main) }) => Some(service.clone()),
-            None => self.seen.mains.get(&p.pid).cloned(),
-            _ => None,
-        }
+        self.status = self.service_of(pid).map(|name| (pid, name.clone(), ask_status(&name)));
     }
 
     /// What may be done to the picked process, and what is being done.
@@ -515,18 +579,39 @@ impl Manager {
             Some(Err(why)) => format!("<p class=\"note bad\" role=\"alert\">{}</p>", escape(why)),
             None => String::new(),
         };
-        let service = self.main_of_service(p);
+        let main = self.is_main(p.pid);
+        let service_name = self.status.as_ref().filter(|(at, ..)| *at == p.pid).map(|(_, name, _)| {
+            self.service(name).and_then(|s| s.display_name.clone()).unwrap_or_else(|| name.clone())
+        });
         let body = match &self.doing {
             Doing::AskingEnd => format!(
                 "<div class=\"asking\"><p>End {name}? Anything it hasn't saved is lost.{service}</p>\
                  <button type=\"button\" class=\"danger\" fx-click=\"end-confirm\">End process</button>\
                  <button type=\"button\" fx-click=\"cancel\">Cancel</button></div>",
                 name = escape(&self.name(p)),
-                service = match &service {
-                    Some(_) => " It is a service's main process: peinit will take it as having crashed, and may start it again.",
-                    None => "",
+                service = if main {
+                    " It is its service's main process: peinit will take it as having crashed, and may start it \
+                     again. Stop service stops it for good."
+                } else {
+                    ""
                 },
             ),
+            Doing::AskingStopService => format!(
+                "<div class=\"asking\"><p>Stop {name}? It and everything it started end, and it stays stopped until \
+                 it is started again.</p>\
+                 <button type=\"button\" class=\"danger\" fx-click=\"stop-service-confirm\">Stop service</button>\
+                 <button type=\"button\" fx-click=\"cancel\">Cancel</button></div>",
+                name = escape(service_name.as_deref().unwrap_or("its service")),
+            ),
+            Doing::AskingStopJob => {
+                let what = self.job_of(p).map(|job| job.description.clone()).filter(|d| !d.is_empty());
+                format!(
+                    "<div class=\"asking\"><p>Stop {what}? Everything in it ends.</p>\
+                     <button type=\"button\" class=\"danger\" fx-click=\"stop-job-confirm\">Stop job</button>\
+                     <button type=\"button\" fx-click=\"cancel\">Cancel</button></div>",
+                    what = escape(&what.map_or_else(|| "its job".to_string(), |d| format!("“{d}”"))),
+                )
+            }
             Doing::Ending { pid, since, .. } if *pid == p.pid => {
                 if since.elapsed() >= GRACE {
                     "<div class=\"asking\"><p>It was asked to end and hasn't. Ending it at once gives it no chance to finish what it is doing.</p>\
@@ -537,13 +622,42 @@ impl Manager {
                     "<p class=\"note\" role=\"status\">Asked it to end…</p>".into()
                 }
             }
-            _ => match self.may_end.as_ref().filter(|(pid, _)| *pid == p.pid) {
-                Some((_, Ok(()))) => {
-                    "<div class=\"actions\"><button type=\"button\" fx-click=\"end\">End process</button></div>".into()
+            _ => {
+                // Each thing is offered only where it would be done, and
+                // where it wouldn't, why not is said instead.
+                let mut buttons = Vec::new();
+                let mut why_not = Vec::new();
+                match self.may_end.as_ref().filter(|(pid, _)| *pid == p.pid) {
+                    Some((_, Ok(()))) => buttons.push("<button type=\"button\" fx-click=\"end\">End process</button>"),
+                    Some((_, Err(why))) => why_not.push(why.clone()),
+                    None => {}
                 }
-                Some((_, Err(why))) => format!("<p class=\"may\">{}</p>", escape(why)),
-                None => String::new(),
-            },
+                match self.status_for(p.pid) {
+                    Some(Ok(status)) if admission(Command::Stop, status.summary.state) == Admission::Acts => {
+                        if status.granted.iter().any(|right| right == "stop") {
+                            buttons.push("<button type=\"button\" fx-click=\"stop-service\">Stop service</button>");
+                        } else {
+                            why_not.push("Its service's permissions don't let you stop it.".into());
+                        }
+                    }
+                    Some(Err(why)) => why_not.push(format!("Whether you may stop its service couldn't be asked: {why}")),
+                    _ => {}
+                }
+                if let Some(job) = self.job_of(p).filter(|job| job.state == "running" || job.state == "created") {
+                    if job.granted.iter().any(|right| right == "stop") {
+                        buttons.push("<button type=\"button\" fx-click=\"stop-job\">Stop job</button>");
+                    } else {
+                        why_not.push("Its job's permissions don't let you stop it.".into());
+                    }
+                }
+                let buttons = if buttons.is_empty() {
+                    String::new()
+                } else {
+                    format!("<div class=\"actions\">{}</div>", buttons.concat())
+                };
+                let why_not: String = why_not.iter().map(|why| format!("<p class=\"may\">{}</p>", escape(why))).collect();
+                format!("{buttons}{why_not}")
+            }
         };
         format!("{said}{body}")
     }
@@ -572,9 +686,213 @@ impl Manager {
                 }
                 self.doing = Doing::Looking;
             }
+            "stop-service" => {
+                self.said = None;
+                self.doing = Doing::AskingStopService;
+            }
+            "stop-service-confirm" => {
+                self.doing = Doing::Looking;
+                if let Some((_, name, _)) = self.status.clone().filter(|(at, ..)| *at == pid) {
+                    let done = ControlClient::connect_default()
+                        .map_err(|e| e.to_string())
+                        .and_then(|mut client| client.command(Command::Stop, &name).map_err(|e| e.to_string()));
+                    self.said = Some(match done {
+                        Ok(_) => Ok("Asked peinit to stop its service.".into()),
+                        Err(why) => Err(format!("Its service couldn't be stopped: {why}")),
+                    });
+                    self.status = Some((pid, name.clone(), ask_status(&name)));
+                }
+            }
+            "stop-job" => {
+                self.said = None;
+                self.doing = Doing::AskingStopJob;
+            }
+            "stop-job-confirm" => {
+                self.doing = Doing::Looking;
+                let id = self.proc(pid).and_then(|p| self.job_of(p)).map(|job| job.id.clone());
+                if let Some(id) = id {
+                    let done = ControlClient::connect_default()
+                        .map_err(|e| e.to_string())
+                        .and_then(|mut client| client.job_stop(&id).map_err(|e| e.to_string()));
+                    self.said = Some(match done {
+                        Ok(_) => Ok("Asked peinit to stop its job.".into()),
+                        Err(why) => Err(format!("Its job couldn't be stopped: {why}")),
+                    });
+                }
+            }
             "cancel" => self.doing = Doing::Looking,
             _ => {}
         }
+    }
+}
+
+/// What peinit says of `service` now, asked as this person.
+fn ask_status(service: &str) -> Result<Status, String> {
+    let mut client = ControlClient::connect_default().map_err(|e| e.to_string())?;
+    client.status_of(service).map_err(|e| e.to_string())
+}
+
+impl Manager {
+    /// Who is signed in: the kernel's list where the person may read it,
+    /// with the processes each session has that the person may see; or else
+    /// the sessions of the processes they may see, which are their own.
+    fn signed(&self) -> Vec<Signed> {
+        let mut pids: HashMap<u64, Vec<u32>> = HashMap::new();
+        for p in &self.seen.procs {
+            if let Ok(owner) = &p.owner {
+                pids.entry(owner.session.0).or_default().push(p.pid);
+            }
+        }
+        match &self.seen.sessions {
+            Ok(listing) => listing
+                .iter()
+                .map(|s| Signed {
+                    id: s.id.0,
+                    user: s.user,
+                    logon_type: Some(s.logon_type),
+                    package: Some(s.auth_package.clone()).filter(|p| !p.is_empty()),
+                    created: Some(s.created_at),
+                    pids: pids.remove(&s.id.0).unwrap_or_default(),
+                })
+                .collect(),
+            Err(_) => {
+                let mut seen: Vec<Signed> = Vec::new();
+                for p in &self.seen.procs {
+                    let Ok(owner) = &p.owner else { continue };
+                    if seen.iter().any(|s| s.id == owner.session.0) {
+                        continue;
+                    }
+                    seen.push(Signed {
+                        id: owner.session.0,
+                        user: owner.user,
+                        logon_type: None,
+                        package: None,
+                        created: None,
+                        pids: pids.remove(&owner.session.0).unwrap_or_default(),
+                    });
+                }
+                seen
+            }
+        }
+    }
+
+    /// Whether a session is a person's, and not a service's or the kernel's
+    /// own.
+    fn a_persons(s: &Signed) -> bool {
+        s.id != LogonSessionInfo::SYSTEM.0 && s.id != LogonSessionInfo::ANONYMOUS.0 && s.logon_type != Some(5)
+    }
+
+    /// What kind of sign-in a session is: the kernel says console, remote,
+    /// service and so on; where its processes are says desktop from SSH.
+    fn kind(&self, s: &Signed) -> &'static str {
+        let members = s.pids.iter().filter_map(|pid| self.proc(*pid)?.member.as_ref());
+        let mut desktop = false;
+        let mut ssh = false;
+        for member in members {
+            match member {
+                CgroupMember::Job(_) => desktop = true,
+                CgroupMember::Service { service, .. } if service == "sshd" => ssh = true,
+                _ => {}
+            }
+        }
+        words::session_kind(s.logon_type, desktop, ssh)
+    }
+
+    fn who(&self, sid: &Sid) -> String {
+        self.seen.names.get(sid).cloned().unwrap_or_else(|| sid.to_string())
+    }
+
+    fn sessions_listing(&self, fields: &Fields) -> String {
+        let all = !fields.get("services").is_empty();
+        let filter = fields.get("filter").trim().to_lowercase();
+        let signed: Vec<Signed> = self
+            .signed()
+            .into_iter()
+            .filter(|s| all || Self::a_persons(s))
+            .filter(|s| filter.is_empty() || self.who(&s.user).to_lowercase().contains(&filter) || s.id.to_string() == filter)
+            .collect();
+        if signed.is_empty() {
+            return "<p class=\"more\">Nobody is signed in that you can see.</p>".into();
+        }
+        let mut sorted = signed;
+        sorted.sort_by_key(|s| (self.who(&s.user).to_lowercase(), s.id));
+        let rows: String = sorted
+            .iter()
+            .map(|s| {
+                format!(
+                    "<li><button type=\"button\" fx-click=\"pick-session\" fx-value-id=\"{id}\" aria-selected=\"{picked}\">\
+                     <span class=\"name\">{who}</span><span class=\"kind\">{kind}</span><span class=\"since\">{since}</span>\
+                     <span class=\"num\">{count}</span></button></li>",
+                    id = s.id,
+                    picked = self.session == Some(s.id),
+                    who = escape(&self.who(&s.user)),
+                    kind = self.kind(s),
+                    since = s.created.map(|at| escape(&words::when(at))).unwrap_or_default(),
+                    count = s.pids.len(),
+                )
+            })
+            .collect();
+        format!("<ul class=\"entries\">{rows}</ul>")
+    }
+
+    fn sessions_notes(&self) -> String {
+        match &self.seen.sessions {
+            Ok(_) => String::new(),
+            Err(why) => format!(
+                "<p class=\"said\" role=\"status\">{} These are the sessions your own processes are in.</p>",
+                escape(why)
+            ),
+        }
+    }
+
+    fn session_details(&self) -> String {
+        let Some(id) = self.session else {
+            return "<aside class=\"details\"><p class=\"more\">Pick a session to see it in full.</p></aside>".into();
+        };
+        let Some(s) = self.signed().into_iter().find(|s| s.id == id) else {
+            return format!("<aside class=\"details\"><h2>Session {id}</h2><p class=\"note\">It has ended.</p></aside>");
+        };
+        let mut facts: Vec<(String, String)> = vec![("Signed in".into(), self.kind(&s).into())];
+        if let Some(at) = s.created {
+            facts.push(("Since".into(), escape(&words::when(at))));
+        }
+        if let Some(package) = &s.package {
+            facts.push(("Through".into(), escape(&words::package(package))));
+        }
+        facts.push(("SID".into(), format!("<code class=\"sid\">{}</code>", escape(&s.user.to_string()))));
+        if let Some(job) = self
+            .seen
+            .jobs
+            .as_ref()
+            .ok()
+            .and_then(|jobs| jobs.iter().find(|j| j.logon_session == Some(id) && j.state == "running"))
+        {
+            facts.push(("Desktop".into(), escape(&job.description)));
+        }
+        let dl: String = facts.iter().map(|(k, v)| format!("<dt>{k}</dt><dd>{v}</dd>")).collect();
+        let processes = if s.pids.is_empty() {
+            "<p class=\"more\">None you can see. A session lasts while anything holds it, \
+             such as a sign-in still under way.</p>"
+                .to_string()
+        } else {
+            format!(
+                "<ul class=\"plain\">{}</ul>",
+                s.pids
+                    .iter()
+                    .filter_map(|pid| self.proc(*pid))
+                    .map(|p| format!(
+                        "<li><button type=\"button\" class=\"link\" fx-click=\"show-process\" fx-value-pid=\"{pid}\">{name}</button> <span class=\"pid\">{pid}</span></li>",
+                        pid = p.pid,
+                        name = escape(&self.name(p)),
+                    ))
+                    .collect::<String>()
+            )
+        };
+        format!(
+            "<aside class=\"details\"><h2>{who}</h2><p class=\"id\">Session {id}</p><dl>{dl}</dl>\
+             <h3>Processes</h3>{processes}</aside>",
+            who = escape(&self.who(&s.user)),
+        )
     }
 }
 
@@ -592,29 +910,66 @@ impl Live for Manager {
                 self.sort == sort
             )
         };
-        format!(
-            "<div class=\"bar\"><span class=\"label\">Group by</span><div class=\"tabs\" role=\"group\" aria-label=\"Group by\">{service}{person}{none}</div>\
-             <input name=\"filter\" autocomplete=\"off\" spellcheck=\"false\" placeholder=\"Find by name, PID, person or service\" aria-label=\"Find\">\
-             <label class=\"check\"><input type=\"checkbox\" name=\"kernel\"> Kernel threads</label>\
-             <button type=\"button\" fx-click=\"refresh\" fx-key=\"F5\" title=\"Read again (F5)\">Refresh</button></div>{notes}\
-             <div class=\"body\"><div class=\"list\"><div class=\"head\">{name}{pid}<span>Runs as</span>{cpu}{memory}</div>{listing}</div>{details}</div>{footer}",
-            service = tab(Grouping::Service, "Service"),
-            person = tab(Grouping::Person, "Person"),
-            none = tab(Grouping::None, "None"),
-            notes = self.notes(),
-            name = sorter(Sort::Name, "Name", "name"),
-            pid = sorter(Sort::Pid, "PID", "pid"),
-            cpu = sorter(Sort::Cpu, "CPU", "cpu"),
-            memory = sorter(Sort::Memory, "Memory", "memory"),
-            listing = self.listing(facts.fields),
-            details = self.details(),
-            footer = self.footer(),
-        )
+        let view = |view: View, label: &str| {
+            format!(
+                "<button type=\"button\" class=\"tab\" fx-click=\"view\" fx-value-by=\"{label}\" aria-pressed=\"{}\">{label}</button>",
+                self.view == view
+            )
+        };
+        let views = format!(
+            "<div class=\"tabs\" role=\"group\" aria-label=\"Show\">{}{}</div>",
+            view(View::Processes, "Processes"),
+            view(View::SignedIn, "Signed in"),
+        );
+        let refresh = "<button type=\"button\" fx-click=\"refresh\" fx-key=\"F5\" title=\"Read again (F5)\">Refresh</button>";
+        match self.view {
+            View::Processes => format!(
+                "<div class=\"bar\">{views}<span class=\"label\">Group by</span><div class=\"tabs\" role=\"group\" aria-label=\"Group by\">{service}{person}{none}</div>\
+                 <input name=\"filter\" autocomplete=\"off\" spellcheck=\"false\" placeholder=\"Find by name, PID, person or service\" aria-label=\"Find\">\
+                 <label class=\"check\"><input type=\"checkbox\" name=\"kernel\"> Kernel threads</label>{refresh}</div>{notes}\
+                 <div class=\"body\"><div class=\"list\"><div class=\"head\">{name}{pid}<span>Runs as</span>{cpu}{memory}</div>{listing}</div>{details}</div>{footer}",
+                service = tab(Grouping::Service, "Service"),
+                person = tab(Grouping::Person, "Person"),
+                none = tab(Grouping::None, "None"),
+                notes = self.notes(),
+                name = sorter(Sort::Name, "Name", "name"),
+                pid = sorter(Sort::Pid, "PID", "pid"),
+                cpu = sorter(Sort::Cpu, "CPU", "cpu"),
+                memory = sorter(Sort::Memory, "Memory", "memory"),
+                listing = self.listing(facts.fields),
+                details = self.details(),
+                footer = self.footer(),
+            ),
+            View::SignedIn => format!(
+                "<div class=\"bar\">{views}\
+                 <input name=\"filter\" autocomplete=\"off\" spellcheck=\"false\" placeholder=\"Find by person or session\" aria-label=\"Find\">\
+                 <label class=\"check\"><input type=\"checkbox\" name=\"services\"> Services' sessions</label>{refresh}</div>{notes}\
+                 <div class=\"body\"><div class=\"list sessions\"><div class=\"head\"><span>Person</span><span>Signed in</span><span>Since</span><span class=\"right\">Processes</span></div>{listing}</div>{details}</div>{footer}",
+                notes = self.sessions_notes(),
+                listing = self.sessions_listing(facts.fields),
+                details = self.session_details(),
+                footer = self.footer(),
+            ),
+        }
     }
 
     fn event(&mut self, name: &str, value: &Value, _fields: &mut Fields) {
         let by = value["by"].as_str().unwrap_or("");
         match name {
+            "view" => {
+                self.view = if by == "Signed in" { View::SignedIn } else { View::Processes };
+            }
+            "pick-session" => {
+                if let Some(id) = value["id"].as_str().and_then(|id| id.parse().ok()) {
+                    self.session = Some(id);
+                }
+            }
+            "show-process" => {
+                if let Some(pid) = value["pid"].as_str().and_then(|pid| pid.parse().ok()) {
+                    self.view = View::Processes;
+                    self.pick(pid);
+                }
+            }
             "group" => {
                 self.grouping = match by {
                     "Person" => Grouping::Person,
@@ -652,6 +1007,7 @@ mod tests {
     use crate::procs::{Owner, Stat};
     use peinit::client::ServicePart;
     use peios::token::SessionId;
+    use std::time::Duration;
 
     fn stat(name: &str, ticks: u64) -> Stat {
         Stat { name: name.into(), state: 'S', ppid: 1, kernel: false, ticks, threads: 1, started: 0, resident: 100 }
@@ -718,6 +1074,53 @@ mod tests {
         assert!(m.matches(p10, "ssh"));
         assert!(m.matches(m.proc(31).unwrap(), "31"));
         assert!(!m.matches(p10, "bash"));
+    }
+
+    fn session(id: u64, sid: &str, logon_type: u32) -> LogonSessionInfo {
+        LogonSessionInfo {
+            id: SessionId(id),
+            user: sid.parse().unwrap(),
+            logon_type,
+            auth_package: "lpsd".into(),
+            created_at: std::time::UNIX_EPOCH + Duration::from_secs(1_791_120_598),
+        }
+    }
+
+    #[test]
+    fn the_kernel_s_list_gives_each_session_its_processes_and_services_wait_to_be_asked_for() {
+        let mut desktop = proc(40, "gexora", None, Some("S-1-5-21-1-2-3-1002"));
+        desktop.member = Some(CgroupMember::Job("4f7a".into()));
+        if let Ok(owner) = &mut desktop.owner {
+            owner.session = SessionId(1007);
+        }
+        let mut m = window(vec![desktop]);
+        m.seen.sessions = Ok(vec![
+            session(1007, "S-1-5-21-1-2-3-1002", 10),
+            session(1004, "S-1-5-80-1-2-3-4-5", 5),
+            session(999, "S-1-5-18", 5),
+        ]);
+        m.view = View::SignedIn;
+        let listing = m.sessions_listing(&Fields::default());
+        assert!(listing.contains("On the desktop"), "{listing}");
+        assert!(!listing.contains("S-1-5-80"), "a service's session waits to be asked for: {listing}");
+        assert!(!listing.contains("S-1-5-18"), "{listing}");
+        let signed = m.signed();
+        assert_eq!(signed.iter().find(|s| s.id == 1007).unwrap().pids, vec![40]);
+    }
+
+    #[test]
+    fn without_the_list_the_person_s_own_sessions_are_shown_and_why_is_said() {
+        let mut own = proc(50, "sh", None, Some("S-1-5-21-1-2-3-1001"));
+        if let Ok(owner) = &mut own.owner {
+            owner.session = SessionId(1010);
+        }
+        let mut m = window(vec![own]);
+        m.seen.sessions = Err("Only Administrators may see everyone who is signed in.".into());
+        let signed = m.signed();
+        assert_eq!(signed.len(), 1);
+        assert_eq!(signed[0].id, 1010);
+        assert_eq!(signed[0].logon_type, None);
+        assert!(m.sessions_notes().contains("Only Administrators"));
     }
 
     #[test]

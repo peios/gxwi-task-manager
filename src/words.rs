@@ -51,6 +51,57 @@ fn plural(n: u64, what: &str) -> String {
     if n == 1 { format!("1 {what}") } else { format!("{n} {what}s") }
 }
 
+/// What kind of sign-in a session is, from its logon type and where its
+/// processes are: a remote one is a desktop where it runs a job (the
+/// desktop's session is one), SSH where it is under sshd.
+pub fn session_kind(logon_type: Option<u32>, desktop: bool, ssh: bool) -> &'static str {
+    match logon_type {
+        Some(2) => "At the machine",
+        Some(10) if desktop => "On the desktop",
+        Some(10) if ssh => "Over SSH",
+        Some(10) => "Remotely",
+        Some(3) => "Over the network",
+        Some(8) => "Over the network, by password",
+        Some(4) => "To run a task",
+        Some(5) => "As a service",
+        Some(9) => "With other credentials",
+        Some(_) => "Some other way",
+        None if desktop => "On the desktop",
+        None if ssh => "Over SSH",
+        None => "",
+    }
+}
+
+/// When something happened, on this machine's clock: the time alone today,
+/// the day and time before that.
+pub fn when(at: std::time::SystemTime) -> String {
+    let seconds = at.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    // The kernel makes SYSTEM's and Anonymous's sessions before the clock
+    // is set.
+    if seconds == 0 {
+        return "When the machine started".into();
+    }
+    let Ok(stamp) = jiff::Timestamp::from_second(seconds as i64) else { return String::new() };
+    let zone = jiff::tz::TimeZone::system();
+    let then = stamp.to_zoned(zone.clone());
+    let today = jiff::Timestamp::now().to_zoned(zone).date();
+    if then.date() == today {
+        format!("Today, {}", then.strftime("%H:%M"))
+    } else {
+        then.strftime("%-d %b, %H:%M").to_string()
+    }
+}
+
+/// The authentication package that made a session, as a person would know it.
+pub fn package(name: &str) -> String {
+    match name {
+        "lpsd" => "This machine's own users (lpsd)".into(),
+        "attested" => "Started by the service manager".into(),
+        "Negotiate" => "The kernel".into(),
+        other => other.to_string(),
+    }
+}
+
 /// Why a call failed, in words, for the errors a person can act on.
 pub fn io_error(error: &std::io::Error) -> String {
     match error.raw_os_error() {
@@ -130,7 +181,9 @@ pub fn integrity(level: IntegrityLevel) -> String {
 /// Which of a service's processes this is.
 pub fn part(part: Option<ServicePart>) -> &'static str {
     match part {
-        Some(ServicePart::Main) => "its main process",
+        // The main process's cgroup holds everything it starts too; which one
+        // is the main process itself is peinit's to say.
+        Some(ServicePart::Main) => "started by its main process",
         Some(ServicePart::Hooks) => "a hook",
         Some(ServicePart::Health) => "a health check",
         Some(ServicePart::Checks) => "a check before it starts",

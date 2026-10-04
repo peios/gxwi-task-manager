@@ -14,6 +14,7 @@ use std::time::Duration;
 use gxwi_sd_editor::names::Names;
 use libgxwi::{App, Surface};
 use peinit::client::{ControlClient, State};
+use peios::token::Session;
 
 mod ending;
 mod manager;
@@ -104,11 +105,21 @@ fn look() -> Seen {
         }
     }
 
+    let sessions = Session::list().map_err(|e| match e.raw_os_error() {
+        Some(libc::EACCES) => "Only Administrators may see everyone who is signed in.".to_string(),
+        Some(libc::ENOENT) => "The kernel's list of who is signed in isn't there: securityfs isn't mounted.".to_string(),
+        _ => format!("Who is signed in couldn't be read: {e}"),
+    });
+
     let mut names = HashMap::new();
-    for owner in procs.iter().filter_map(|p| p.owner.as_ref().ok()) {
-        names.entry(owner.user).or_insert_with(|| {
-            looker.names.learn(&owner.user);
-            looker.names.of(&owner.user)
+    let users = procs
+        .iter()
+        .filter_map(|p| p.owner.as_ref().ok().map(|owner| owner.user))
+        .chain(sessions.iter().flatten().map(|s| s.user));
+    for user in users {
+        names.entry(user).or_insert_with(|| {
+            looker.names.learn(&user);
+            looker.names.of(&user)
         });
     }
     // A service runs as a SID made from its name, which nobody holds a
@@ -132,6 +143,7 @@ fn look() -> Seen {
         jobs,
         mains: looker.mains.iter().filter_map(|(pid, s)| Some((*pid, s.clone()?))).collect(),
         names,
+        sessions,
         uptime: std::fs::read_to_string("/proc/uptime")
             .ok()
             .and_then(|text| text.split_whitespace().next()?.parse().ok()),

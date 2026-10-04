@@ -21,3 +21,5 @@ gxwi-sd-editor = { path = "../gxwi-sd-editor", default-features = false, feature
 # service runs is said to be the service's. Beside this checkout.
 libauthd-policy = { path = "../authd/libauthd-policy" }
 libc = "0.2"
+# When someone signed in, on this machine's clock.
+jiff = "0.2.29"

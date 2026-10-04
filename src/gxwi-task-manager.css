@@ -121,6 +121,12 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent-soli
 .entries button:hover { background: var(--surface-2); }
 .entries button[aria-selected="true"] { background: var(--surface-2); border-color: var(--accent-solid); }
 
+/* Who is signed in. */
+.sessions .head, .sessions .entries button { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr) 80px; }
+.head .right { text-align: right; }
+.entries .kind, .entries .since { font-size: 12px; }
+.details .plain .pid { margin-left: var(--space-1); font: 500 11px/1.4 var(--font-mono); color: var(--text-muted); }
+
 /* A group's heading: what it is, and what it comes to. */
 .entries .group {
     margin-top: var(--space-2);
@@ -204,11 +210,15 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent-soli
     .head, .entries button, .entries .group { grid-template-columns: minmax(0, 1fr) 52px 60px 70px; }
     .head span:nth-child(3), .entries .owner, .entries .group .about { display: none; }
     .entries .group .name { grid-column: 1 / 3; }
+    .sessions .head, .sessions .entries button { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 70px; }
+    .sessions .head span:nth-child(3), .sessions .entries .since { display: none; }
     .details { width: 260px; }
 }
 @media (max-width: 560px) {
     .details { width: 50%; }
     .head, .entries button, .entries .group { grid-template-columns: minmax(0, 1fr) 56px; }
     .entries .group .name { grid-column: auto; }
+    .sessions .head, .sessions .entries button { grid-template-columns: minmax(0, 1fr) 56px; }
+    .sessions .head span:nth-child(2), .sessions .entries .kind { display: none; }
     .head .sort:nth-child(2), .entries .pid, .head .sort:nth-last-child(2), .entries .num:nth-last-child(2) { display: none; }
 }
