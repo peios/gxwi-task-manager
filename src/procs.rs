@@ -160,6 +160,11 @@ fn full_name(pid: u32, short: &str) -> Option<String> {
 }
 
 pub fn full_from_argv0(argv0: &str, short: &str) -> Option<String> {
+    // A program that rewrote its command line into a title is saying
+    // something other than its name.
+    if argv0.contains([' ', ':']) {
+        return None;
+    }
     let base = argv0.rsplit('/').next()?;
     (base.len() > short.len() && base.starts_with(short)).then(|| base.to_string())
 }
