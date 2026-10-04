@@ -16,6 +16,7 @@ use peinit::client::{
     Admission, CgroupMember, Command, ControlClient, Status, SubmittedJob, Summary, admission,
 };
 use peios::security::Sid;
+use libauthd_client::logon::Logon;
 use peios::token::LogonSessionInfo;
 
 use crate::procs::{self, Closed, Proc};
@@ -29,6 +30,9 @@ pub struct Manager {
     session: Option<u64>,
     /// The job picked, by its id.
     job_picked: Option<String>,
+    /// Whether authd would let this person sign the picked session out, as
+    /// it said when asked, or why not.
+    may_sign_out: Option<(u64, Result<(), String>)>,
     grouping: Grouping,
     sort: Sort,
     picked: Option<u32>,
@@ -53,6 +57,8 @@ enum Doing {
     AskingStopService,
     /// Asking before its job is stopped.
     AskingStopJob,
+    /// Asking before a session is signed out.
+    AskingSignOut,
     /// Asked to end, through a handle held on it since.
     Ending { pid: u32, pidfd: OwnedFd, since: Instant },
 }
@@ -166,6 +172,7 @@ impl Manager {
             view: View::Processes,
             session: None,
             job_picked: None,
+            may_sign_out: None,
             grouping: Grouping::Service,
             sort: Sort::Name,
             picked: None,
@@ -675,6 +682,24 @@ impl Manager {
     }
 
     fn act(&mut self, name: &str) {
+        // A session picked in Signed in is signed out from its own pane.
+        if self.view == View::SignedIn {
+            match name {
+                "sign-out" => {
+                    self.said = None;
+                    self.doing = Doing::AskingSignOut;
+                }
+                "sign-out-confirm" => {
+                    self.doing = Doing::Looking;
+                    if let Some(id) = self.session {
+                        self.sign_out(id);
+                    }
+                }
+                "cancel" => self.doing = Doing::Looking,
+                _ => {}
+            }
+            return;
+        }
         // A job picked in Jobs is stopped from its own pane.
         if self.view == View::Jobs {
             match name {
@@ -874,7 +899,11 @@ impl Manager {
             return "<aside class=\"details\"><p class=\"more\">Pick a session to see it in full.</p></aside>".into();
         };
         let Some(s) = self.signed().into_iter().find(|s| s.id == id) else {
-            return format!("<aside class=\"details\"><h2>Session {id}</h2><p class=\"note\">It has ended.</p></aside>");
+            let said = match &self.said {
+                Some(Ok(done)) => escape(done),
+                _ => "It has ended.".into(),
+            };
+            return format!("<aside class=\"details\"><h2>Session {id}</h2><p class=\"note\" role=\"status\">{said}</p></aside>");
         };
         let mut facts: Vec<(String, String)> = vec![("Signed in".into(), self.kind(&s).into())];
         if let Some(at) = s.created {
@@ -913,10 +942,79 @@ impl Manager {
             )
         };
         format!(
-            "<aside class=\"details\"><h2>{who}</h2><p class=\"id\">Session {id}</p><dl>{dl}</dl>\
+            "<aside class=\"details\"><h2>{who}</h2><p class=\"id\">Session {id}</p>{actions}<dl>{dl}</dl>\
              <h3>Processes</h3>{processes}</aside>",
             who = escape(&self.who(&s.user)),
+            actions = self.sign_out_actions(&s),
         )
+    }
+
+    /// Whether this window runs in the session `id`, so signing it out ends
+    /// the window too.
+    fn is_own_session(&self, id: u64) -> bool {
+        let me = std::process::id();
+        self.proc(me).and_then(|p| p.owner.as_ref().ok()).is_some_and(|owner| owner.session.0 == id)
+    }
+
+    /// Whether authd would let this person sign the session `id` out, asked
+    /// with the question that ends nothing.
+    fn ask_sign_out(&self, id: u64) -> Result<(), String> {
+        if let Some(s) = self.signed().into_iter().find(|s| s.id == id)
+            && !Self::a_persons(&s)
+        {
+            return Err("A service's session ends when its service stops, and the kernel's own never end.".into());
+        }
+        match Logon::new().with_timeout(Duration::from_secs(5)).may_end_session(id) {
+            Ok(()) => Ok(()),
+            Err(refusal) if refusal.not_permitted() => Err(
+                "You may not sign this session out: only the person it is, and whoever the machine's \
+                 permissions allow (Administrators, as shipped), may."
+                    .into(),
+            ),
+            Err(refusal) if refusal.no_such_session() => Err("It has already ended.".into()),
+            Err(refusal) => Err(format!("Whether you may sign it out couldn't be asked of authd: {refusal}")),
+        }
+    }
+
+    fn sign_out_actions(&self, s: &Signed) -> String {
+        let said = match &self.said {
+            Some(Ok(done)) => format!("<p class=\"note\" role=\"status\">{}</p>", escape(done)),
+            Some(Err(why)) => format!("<p class=\"note bad\" role=\"alert\">{}</p>", escape(why)),
+            None => String::new(),
+        };
+        let body = match &self.doing {
+            Doing::AskingSignOut => format!(
+                "<div class=\"asking\"><p>Sign {who} out of this session? Everything running in it ends, and \
+                 anything not saved is lost.{own}</p>\
+                 <button type=\"button\" class=\"danger\" fx-click=\"sign-out-confirm\">Sign out</button>\
+                 <button type=\"button\" fx-click=\"cancel\">Cancel</button></div>",
+                who = escape(&self.who(&s.user)),
+                own = if self.is_own_session(s.id) { " It is your own session: this window closes with it." } else { "" },
+            ),
+            _ => match self.may_sign_out.as_ref().filter(|(id, _)| *id == s.id) {
+                Some((_, Ok(()))) => {
+                    "<div class=\"actions\"><button type=\"button\" fx-click=\"sign-out\">Sign out</button></div>".into()
+                }
+                Some((_, Err(why))) => format!("<p class=\"may\">{}</p>", escape(why)),
+                None => String::new(),
+            },
+        };
+        format!("{said}{body}")
+    }
+
+    fn sign_out(&mut self, id: u64) {
+        self.said = Some(match Logon::new().end_session(id) {
+            Ok(ended) if ended.remaining == 0 => Ok(format!(
+                "Signed out: {}.",
+                if ended.ended == 1 { "1 process ended".to_string() } else { format!("{} processes ended", ended.ended) }
+            )),
+            Ok(ended) => Ok(format!(
+                "{} ended, but {} still hold the session: authd couldn't end them.",
+                ended.ended, ended.remaining
+            )),
+            Err(refusal) if refusal.no_such_session() => Ok("It had already ended.".into()),
+            Err(refusal) => Err(format!("It couldn't be signed out: {refusal}")),
+        });
     }
 }
 
@@ -1142,7 +1240,12 @@ impl Live for Manager {
             }
             "pick-session" => {
                 if let Some(id) = value["id"].as_str().and_then(|id| id.parse().ok()) {
+                    if self.session != Some(id) {
+                        self.doing = Doing::Looking;
+                        self.said = None;
+                    }
                     self.session = Some(id);
+                    self.may_sign_out = Some((id, self.ask_sign_out(id)));
                 }
             }
             "show-process" => {

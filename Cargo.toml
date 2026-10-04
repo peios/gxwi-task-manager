@@ -17,6 +17,9 @@ peinit2 = { path = "../peinit", default-features = false }
 # Who a SID is, as the permissions editor says it: the well-known by their
 # documented names, everyone else by asking authd. Beside this checkout.
 gxwi-sd-editor = { path = "../gxwi-sd-editor", default-features = false, features = ["names"] }
+# Signing a session out: authd ends it, asked on its logon socket. Beside
+# this checkout.
+libauthd-client = { path = "../authd/libauthd-client" }
 # A service's SID, made from its name as authd makes it, so a process a
 # service runs is said to be the service's. Beside this checkout.
 libauthd-policy = { path = "../authd/libauthd-policy" }
