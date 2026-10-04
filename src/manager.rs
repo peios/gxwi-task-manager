@@ -495,6 +495,14 @@ impl Manager {
                 let shown = self.service(service).and_then(|s| s.display_name.clone()).unwrap_or_else(|| service.clone());
                 let which = if self.is_main(pid) { "its main process" } else { words::part(*part) };
                 facts.push(("Belongs to".into(), format!("{} — {}", escape(&shown), which)));
+                if let Some(Ok(status)) = self.status_for(pid) {
+                    if let Some(text) = &status.status_text {
+                        facts.push(("Service says".into(), escape(text)));
+                    }
+                    if let Some(progress) = &status.progress {
+                        facts.push(("Progress".into(), escape(&words::progress(progress))));
+                    }
+                }
             }
             Some(CgroupMember::Job(id)) => {
                 let what = self.job(id).map(|j| j.description.clone()).filter(|d| !d.is_empty());
