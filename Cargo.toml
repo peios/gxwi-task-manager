@@ -1,0 +1,20 @@
+[package]
+name = "gxwi-task-manager"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+# Beside this checkout until a libgxwi with the dialog role is released.
+libgxwi = { path = "../gxwi/libgxwi" }
+# Tokens, SIDs and a process's PSB. Every crate in one program must pin the
+# same revision: `peios-sys` links libpeios, and a program can hold only one.
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "716b094", package = "peios" }
+# What peinit offers a program that manages services (`peinit::client`),
+# and nothing of its own runtime. Beside this checkout until it is pushed.
+peinit2 = { path = "../peinit", default-features = false }
+# Who a SID is, as the permissions editor says it: the well-known by their
+# documented names, everyone else by asking authd. Beside this checkout.
+gxwi-sd-editor = { path = "../gxwi-sd-editor", default-features = false, features = ["names"] }
+libc = "0.2"

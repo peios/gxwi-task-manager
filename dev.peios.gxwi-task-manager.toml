@@ -1,0 +1,6 @@
+# What Task Manager is to a desktop (PGSS Applications): installed as
+# /usr/share/apps/dev.peios.gxwi-task-manager.toml, named for the id, by the
+# package that installs the program. It is a window and nothing else.
+title = "Task Manager"
+description = "See what is running, and who is signed in"
+program = "/usr/bin/gxwi-task-manager"
