@@ -694,6 +694,11 @@ impl Manager {
                     if let Some(id) = self.session {
                         self.sign_out(id);
                     }
+                    // Its processes are gone now, and the session with them:
+                    // shown at once, not at the next look.
+                    if let Some(window) = self.window.upgrade() {
+                        std::thread::spawn(move || crate::look_now(&window));
+                    }
                 }
                 "cancel" => self.doing = Doing::Looking,
                 _ => {}
@@ -1003,6 +1008,9 @@ impl Manager {
     }
 
     fn sign_out(&mut self, id: u64) {
+        // Not offered again: the kernel may list the session a moment
+        // longer, until the last of it is let go.
+        self.may_sign_out = None;
         self.said = Some(match Logon::new().end_session(id) {
             Ok(ended) if ended.remaining == 0 => Ok(format!(
                 "Signed out: {}.",
