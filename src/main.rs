@@ -15,6 +15,7 @@ use gxwi_sd_editor::names::Names;
 use libgxwi::{App, Surface};
 use peinit::client::{ControlClient, State};
 
+mod ending;
 mod manager;
 mod procs;
 mod words;

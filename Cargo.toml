@@ -10,7 +10,7 @@ publish = false
 libgxwi = { path = "../gxwi/libgxwi" }
 # Tokens, SIDs and a process's PSB. Every crate in one program must pin the
 # same revision: `peios-sys` links libpeios, and a program can hold only one.
-peios = { git = "https://github.com/peios/peios-rs.git", rev = "716b094", package = "peios" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "2a2a6bb", package = "peios" }
 # What peinit offers a program that manages services (`peinit::client`),
 # and nothing of its own runtime. Beside this checkout until it is pushed.
 peinit2 = { path = "../peinit", default-features = false }

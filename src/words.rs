@@ -51,6 +51,15 @@ fn plural(n: u64, what: &str) -> String {
     if n == 1 { format!("1 {what}") } else { format!("{n} {what}s") }
 }
 
+/// Why a call failed, in words, for the errors a person can act on.
+pub fn io_error(error: &std::io::Error) -> String {
+    match error.raw_os_error() {
+        Some(libc::EACCES | libc::EPERM) => "you may not".into(),
+        Some(libc::ESRCH) => "it has already ended".into(),
+        _ => error.to_string(),
+    }
+}
+
 /// What a process is doing, from the state letter `stat` gives.
 pub fn process_state(state: char) -> &'static str {
     match state {

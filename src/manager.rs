@@ -7,14 +7,16 @@
 //! list says how much of the machine that leaves out.
 
 use std::collections::HashMap;
+use std::os::fd::OwnedFd;
 use std::sync::Weak;
+use std::time::{Duration, Instant};
 
 use libgxwi::{Facts, Fields, Live, Surface, Value, escape};
 use peinit::client::{CgroupMember, SubmittedJob, Summary};
 use peios::security::Sid;
 
 use crate::procs::{self, Closed, Proc};
-use crate::words;
+use crate::{ending, words};
 
 pub struct Manager {
     pub window: Weak<Surface<Manager>>,
@@ -24,7 +26,24 @@ pub struct Manager {
     picked: Option<u32>,
     /// The picked process's command line, read when it was picked.
     command: Option<(u32, Result<String, Closed>)>,
+    /// Whether this person may end the picked process, or why not.
+    may_end: Option<(u32, Result<(), String>)>,
+    doing: Doing,
+    /// What came of the last thing done: what was done, or why it wasn't.
+    said: Option<Result<String, String>>,
 }
+
+/// What is being done to the picked process.
+enum Doing {
+    Looking,
+    /// Asking before it is ended.
+    AskingEnd,
+    /// Asked to end, through a handle held on it since.
+    Ending { pid: u32, pidfd: OwnedFd, since: Instant },
+}
+
+/// How long a process asked to end is given before it may be ended at once.
+const GRACE: Duration = Duration::from_secs(5);
 
 /// What was read of the machine, the last time it was looked at.
 #[derive(Debug, Clone)]
@@ -110,6 +129,9 @@ impl Manager {
             sort: Sort::Name,
             picked: None,
             command: None,
+            may_end: None,
+            doing: Doing::Looking,
+            said: None,
         }
     }
 
@@ -445,8 +467,9 @@ impl Manager {
         }
         let dl: String = facts.iter().map(|(k, v)| format!("<dt>{k}</dt><dd>{v}</dd>")).collect();
         format!(
-            "<aside class=\"details\"><h2>{name}</h2><p class=\"id\">Process {pid}</p>{note}<dl>{dl}</dl>{mitigations}</aside>",
+            "<aside class=\"details\"><h2>{name}</h2><p class=\"id\">Process {pid}</p>{note}{actions}<dl>{dl}</dl>{mitigations}</aside>",
             name = escape(&self.name(p)),
+            actions = self.actions(p),
         )
     }
 
@@ -464,9 +487,94 @@ impl Manager {
     }
 
     fn pick(&mut self, pid: u32) {
+        if self.picked != Some(pid) {
+            self.doing = Doing::Looking;
+            self.said = None;
+        }
         self.picked = Some(pid);
         let protected = self.proc(pid).and_then(|p| p.psb).is_some_and(|psb| psb.is_protected());
+        let kernel = self.proc(pid).is_some_and(Self::kernel);
         self.command = Some((pid, procs::command_line(pid, protected)));
+        self.may_end = Some((pid, ending::may_end(pid, protected, kernel)));
+    }
+
+    /// Whether the picked process is a service's main process, which peinit
+    /// restarts by its policy when it ends unasked.
+    fn main_of_service(&self, p: &Proc) -> Option<String> {
+        match &p.member {
+            Some(CgroupMember::Service { service, part: Some(peinit::client::ServicePart::Main) }) => Some(service.clone()),
+            None => self.seen.mains.get(&p.pid).cloned(),
+            _ => None,
+        }
+    }
+
+    /// What may be done to the picked process, and what is being done.
+    fn actions(&self, p: &Proc) -> String {
+        let said = match &self.said {
+            Some(Ok(done)) => format!("<p class=\"note\" role=\"status\">{}</p>", escape(done)),
+            Some(Err(why)) => format!("<p class=\"note bad\" role=\"alert\">{}</p>", escape(why)),
+            None => String::new(),
+        };
+        let service = self.main_of_service(p);
+        let body = match &self.doing {
+            Doing::AskingEnd => format!(
+                "<div class=\"asking\"><p>End {name}? Anything it hasn't saved is lost.{service}</p>\
+                 <button type=\"button\" class=\"danger\" fx-click=\"end-confirm\">End process</button>\
+                 <button type=\"button\" fx-click=\"cancel\">Cancel</button></div>",
+                name = escape(&self.name(p)),
+                service = match &service {
+                    Some(_) => " It is a service's main process: peinit will take it as having crashed, and may start it again.",
+                    None => "",
+                },
+            ),
+            Doing::Ending { pid, since, .. } if *pid == p.pid => {
+                if since.elapsed() >= GRACE {
+                    "<div class=\"asking\"><p>It was asked to end and hasn't. Ending it at once gives it no chance to finish what it is doing.</p>\
+                     <button type=\"button\" class=\"danger\" fx-click=\"end-now\">End it now</button>\
+                     <button type=\"button\" fx-click=\"cancel\">Leave it</button></div>"
+                        .into()
+                } else {
+                    "<p class=\"note\" role=\"status\">Asked it to end…</p>".into()
+                }
+            }
+            _ => match self.may_end.as_ref().filter(|(pid, _)| *pid == p.pid) {
+                Some((_, Ok(()))) => {
+                    "<div class=\"actions\"><button type=\"button\" fx-click=\"end\">End process</button></div>".into()
+                }
+                Some((_, Err(why))) => format!("<p class=\"may\">{}</p>", escape(why)),
+                None => String::new(),
+            },
+        };
+        format!("{said}{body}")
+    }
+
+    fn act(&mut self, name: &str) {
+        let Some(pid) = self.picked else { return };
+        match name {
+            "end" => {
+                self.said = None;
+                self.doing = Doing::AskingEnd;
+            }
+            "end-confirm" => {
+                self.doing = Doing::Looking;
+                match ending::pidfd(pid).and_then(|fd| ending::signal(&fd, libc::SIGTERM).map(|()| fd)) {
+                    Ok(pidfd) => self.doing = Doing::Ending { pid, pidfd, since: Instant::now() },
+                    Err(e) => self.said = Some(Err(format!("It couldn't be ended: {}.", words::io_error(&e)))),
+                }
+            }
+            "end-now" => {
+                if let Doing::Ending { pidfd, .. } = &self.doing {
+                    self.said = Some(match ending::signal(pidfd, libc::SIGKILL) {
+                        Ok(()) => Ok("Ended at once.".into()),
+                        Err(e) if e.raw_os_error() == Some(libc::ESRCH) => Ok("It has ended.".into()),
+                        Err(e) => Err(format!("It couldn't be ended: {}.", words::io_error(&e))),
+                    });
+                }
+                self.doing = Doing::Looking;
+            }
+            "cancel" => self.doing = Doing::Looking,
+            _ => {}
+        }
     }
 }
 
@@ -533,7 +641,7 @@ impl Live for Manager {
                     std::thread::spawn(move || crate::look_now(&window));
                 }
             }
-            _ => {}
+            _ => self.act(name),
         }
     }
 }
