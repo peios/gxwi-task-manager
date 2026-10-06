@@ -1,0 +1,19 @@
+side_effects = ["man-db"]
+
+[package]
+name = "dev.peios.gxwi-task-manager"
+description = "GXWI task manager"
+license = "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache-2.0 OR BSD-2-Clause OR MIT) AND (Apache-2.0 OR BSL-1.0) AND (Apache-2.0 OR MIT) AND BSD-3-Clause AND ISC AND MIT AND (MIT AND BSD-3-Clause) AND (MIT OR Unlicense)"
+
+[dependencies]
+"dev.peios.libpeios" = ">= 0.5.8-1"
+"org.gnu.glibc" = "*"
+"org.gnu.gcc-libgcc" = "*"
+
+[files]
+":usr/share/man/man1/**" = "usr/share/man/man1"
+"@source:LICENSE" = "usr/share/licenses/dev.peios.gxwi-task-manager/LICENSE"
+":licenses/**" = "usr/share/licenses/dev.peios.gxwi-task-manager/third-party"
+":usr/bin/**" = "usr/bin"
+":usr/share/icons/**" = "usr/share/icons"
+":usr/share/apps/**" = "usr/share/apps"

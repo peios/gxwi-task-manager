@@ -6,23 +6,23 @@ license = "MIT"
 publish = false
 
 [dependencies]
-# Beside this checkout until a libgxwi with the dialog role is released.
-libgxwi = { path = "../gxwi/libgxwi" }
+# libgxwi as of the gxwi release dev.peios.gxwi-sdk stages, which a package
+# build takes it from (gxwi's dev/pins.toml).
+libgxwi = { git = "https://github.com/peios/gxwi.git", rev = "5629140add3de075511b3379fd690fdabd06dcaf" }
 # Tokens, SIDs and a process's PSB. Every crate in one program must pin the
 # same revision: `peios-sys` links libpeios, and a program can hold only one.
-peios = { git = "https://github.com/peios/peios-rs.git", rev = "02c87cb643c30eef6b74cd1d9d8b0ae067bed69a", package = "peios" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "f8c84930f2b71763bcf0550df0b1420a0f63b21e", package = "peios" }
 # What peinit offers a program that manages services (`peinit::client`),
-# and nothing of its own runtime. Beside this checkout until it is pushed.
-peinit2 = { path = "../peinit", default-features = false }
+# and nothing of its own runtime.
+peinit2 = { git = "https://github.com/peios/peinit.git", rev = "0ee3ea3c15e0b17e1aed887764bf5e3d6242bde3", default-features = false }
 # Who a SID is, as the permissions editor says it: the well-known by their
-# documented names, everyone else by asking authd. Beside this checkout.
-gxwi-sd-editor = { path = "../gxwi-sd-editor", default-features = false, features = ["names"] }
-# Signing a session out: authd ends it, asked on its logon socket. Beside
-# this checkout.
-libauthd-client = { path = "../authd/libauthd-client" }
+# documented names, everyone else by asking authd.
+gxwi-sd-editor = { git = "https://github.com/peios/gxwi-sd-editor.git", rev = "27239eb3411ab82d711262bfd59e537c66c29e9e", default-features = false, features = ["names"] }
+# Signing a session out: authd ends it, asked on its logon socket.
+libauthd-client = { git = "https://github.com/peios/authd.git", rev = "90471e3d4db127528862fb325b04edb3d4f0fc30" }
 # A service's SID, made from its name as authd makes it, so a process a
-# service runs is said to be the service's. Beside this checkout.
-libauthd-policy = { path = "../authd/libauthd-policy" }
+# service runs is said to be the service's.
+libauthd-policy = { git = "https://github.com/peios/authd.git", rev = "90471e3d4db127528862fb325b04edb3d4f0fc30" }
 libc = "0.2"
 # When someone signed in, on this machine's clock.
 jiff = "0.2.29"

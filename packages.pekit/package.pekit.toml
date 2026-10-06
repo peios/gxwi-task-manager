@@ -1,0 +1,6 @@
+format = "peipkg"
+[package]
+version = "{{version}}-1"
+architecture = "x86_64"
+license_class = "free"
+homepage = "https://github.com/peios/gxwi-task-manager"

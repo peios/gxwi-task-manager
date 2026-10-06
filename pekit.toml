@@ -1,0 +1,80 @@
+# Source-owned packaging. The catalogue delegates to this locked release.
+out_dir = "out"
+[source_package]
+name = "dev.peios.gxwi-task-manager-source"
+[build.vendor]
+command = '''
+set -eu
+export CARGO_HOME=/tmp/cargo
+export CARGO_NET_GIT_FETCH_WITH_CLI=true
+mkdir -p "$CARGO_HOME" "$PEKIT_OUT"
+# gxwi is private, so libgxwi comes from the signed SDK, which stages it
+# as of one release commit. That must be the commit Cargo.lock pins.
+rev=$(sed -n 's|^source = "git+https://github.com/peios/gxwi.git?rev=\([0-9a-f]*\)#.*|\1|p' Cargo.lock | sort -u)
+test "$rev" = "$(cat /usr/share/cargo/gxwi/revision)"
+cat > "$CARGO_HOME/config.toml" <<EOF
+[source.gxwi]
+git = "https://github.com/peios/gxwi.git"
+rev = "$rev"
+replace-with = "gxwi-sdk"
+[source.gxwi-sdk]
+directory = "/usr/share/cargo/gxwi"
+EOF
+cargo vendor --respect-source-config --locked "$PEKIT_OUT/vendor" > "$PEKIT_OUT/cargo-config.toml"
+'''
+[build.vendor.dependencies.peipkg]
+"dev.peios.gxwi-sdk" = "= 0.0.3-1"
+"org.rust-lang.rust" = ">= 1.98.1"
+"com.git-scm.git" = ">= 2.55.0"
+"dev.peios.peiosutils" = "*"
+"org.gnu.sed" = "*"
+[build.main]
+needs = ["vendor"]
+command = "sh packaging/build.sh"
+[build.main.dependencies.peipkg]
+"org.gnu.gzip" = "*"
+"org.git.kernel.dash" = "*"
+"dev.peios.peiosutils" = "*"
+"org.gnu.findutils" = "*"
+"org.gnu.grep" = "*"
+"org.gnu.sed" = "*"
+"org.rust-lang.rust" = ">= 1.98.1"
+"org.gnu.gcc" = ">= 16"
+"org.gnu.binutils" = "*"
+"org.sourceware.debugedit" = "*"
+"org.python.python3" = "*"
+"org.llvm.clang-devel" = ">= 22.1.8"
+"org.pkgconf.pkgconf" = "*"
+"dev.peios.libpeios-devel" = ">= 0.5.8"
+"dev.peios.packaging-tools" = "*"
+
+[test]
+gate = true
+needs = ["main", "vendor"]
+command = '''
+set -eu
+export CARGO_HOME="$PEKIT_OUT/cargo-home"
+mkdir -p "$CARGO_HOME"
+cp "$PEKIT_VENDOR_OUT/cargo-config.toml" "$CARGO_HOME/config.toml"
+unset PEIOS_LIB_DIR PEIOS_INCLUDE PKM_UAPI
+export BINDGEN_EXTRA_CLANG_ARGS="-isystem $(gcc -print-file-name=include) ${BINDGEN_EXTRA_CLANG_ARGS:-}"
+export RUSTC_BOOTSTRAP=1
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Zcf-protection=full"
+cargo test --release --workspace --locked --offline --target-dir "$PEKIT_OUT/tests"
+python3 packaging/check-payload.py "$PEKIT_MAIN_OUT"
+'''
+[test.dependencies.peipkg]
+"org.git.kernel.dash" = "*"
+"dev.peios.peiosutils" = "*"
+"org.gnu.findutils" = "*"
+"org.gnu.grep" = "*"
+"org.gnu.sed" = "*"
+"org.rust-lang.rust" = ">= 1.98.1"
+"org.gnu.gcc" = ">= 16"
+"org.gnu.binutils" = "*"
+"org.sourceware.debugedit" = "*"
+"org.python.python3" = "*"
+"org.llvm.clang-devel" = ">= 22.1.8"
+"org.pkgconf.pkgconf" = "*"
+"dev.peios.libpeios-devel" = ">= 0.5.8"
+"dev.peios.packaging-tools" = "*"
